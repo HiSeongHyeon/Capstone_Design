@@ -1,21 +1,22 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-"""클래스 선언부
+#클래스 선언부
+#npy 파일을 읽어 3D depth map을 그리는 클래스
+#예시 사용법은 main 함수를 참고할것
 
-"""
 class depthMap:
-    def __init__(self, example.npy):
-        self.depth_data = np.load(example.npy)
+    def __init__(self, file_path):
+        self.depth_data = np.load(file_path)
         if self.depth_data.ndim != 2:
             raise ValueError(f"2차원 데이터 형식을 요구합니다, 이 데이터는 {self.depth_data.ndim}입니다.")
         self.depth_data = self.depth_data.astype(np.float32)
         self.height, self.width = self.depth_data.shape
     
     def make_depth_Map(self):
-        x, y = np.meshgrid(np.arange(self.height), np.arange(self.width))
+        x, y = np.meshgrid(np.arange(self.width), np.arange(self.height))
         #샘플링 비율 설정은 기본값 1로 설정했음, 실제 데이터와 비교해봐야함
-        depth = self.depth_data[::1, ::1]
+        depth = self.depth_data
 
         fig = plt.figure(figsize=(8,6))
         ax = fig.add_subplot(111, projection='3d')
@@ -24,12 +25,12 @@ class depthMap:
         ax.set_xlabel('X (px)')
         ax.set_ylabel('Y (px)')
         ax.set_zlabel('Depth (mm)')
-        fig.colorbar(surf, shrink, aspect=12, label='Depth (mm)')
+        fig.colorbar(surf, shrink=0.5, aspect=12, label='Depth (mm)')
         ax.set_title('Depth Surface')
-        plt.show()
         fig.savefig('depthmap.png', dpi=300, bbox_inches='tight')
+        plt.show()
         plt.close(fig)
 
 if __name__ == "__main__":
-    example = depthMap('./example.npy')
+    example = depthMap('example.npy')
     example.make_depth_Map()
