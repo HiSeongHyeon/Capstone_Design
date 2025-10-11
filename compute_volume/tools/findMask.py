@@ -26,11 +26,28 @@ class FindMask:
             raise ValueError("컨투어를 찾을 수 없습니다.")
         #가장 큰 컨투어 선택
         largest_contour = max(contours, key=cv.contourArea)
+        #가장 큰 컨투어의 지름 측정
+        #(x,y), radius = cv.minEnclosingCircle(largest_contour)
+        #print(2*radius)
         #컨투어 내부만 남기는 마스크 생성
         mask = np.zeros_like(self.rawData, dtype=np.uint8)
         cv.drawContours(mask, [largest_contour], -1, color=255, thickness=-1)
         #데이터 마스킹
         masked_data = cv.bitwise_and(self.rawData, self.rawData, mask=mask)
+        #가장 낮은 높이 집합을 기준으로 거리 보정
+        #min_depth = np.min(masked_data[masked_data > 0])
+        #masked_data[masked_data > 0] -= min_depth
+
+        #중간값 사용 방법
+        sorted_depths = np.sort(masked_data[masked_data > 0])
+        
+        # 3. 정렬된 값들 중에서 가장 작은 20개를 선택합니다.
+        lowest_20_depths = sorted_depths[:20]
+        
+        # 4. 선택된 20개 값의 중간값(median)을 계산합니다.
+        baseline_depth = np.median(lowest_20_depths)
+        masked_data[masked_data > 0] -= baseline_depth
+
         if self.savedata:
             np.save('masked_depth.npy', masked_data)
             cv.imwrite('mask.png', mask)
@@ -38,5 +55,5 @@ class FindMask:
         return mask, masked_data
 
 if __name__ == "__main__":
-    example = FindMask('example.npy')
+    example = FindMask('cup_example.npy')
     example.findMask()
