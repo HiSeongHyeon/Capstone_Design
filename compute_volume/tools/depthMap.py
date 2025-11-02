@@ -31,7 +31,18 @@ class depthMap:
         fig.savefig('depthmap.png', dpi=1000, bbox_inches='tight')
         plt.show()
         plt.close(fig)
+    def make_histogram(self):
+        plt.figure(figsize=(8,6))
+        plt.hist(self.depth_data[self.depth_data > 0].ravel(), bins=255, range=(0, np.max(self.depth_data)), color='blue', alpha=0.7)
+        plt.title('Depth Data Histogram')
+        plt.xlabel('Depth (mm)')
+        plt.ylabel('Frequency')
+        plt.grid(True)
+        plt.savefig('depth_histogram.png', dpi=1000, bbox_inches='tight')
+        plt.show()
+        plt.close()
 
 if __name__ == "__main__":
-    example = depthMap('masked_depth.npy')
+    example = depthMap('./example/normalized_cali_04.npy')
     example.make_depth_Map()
+    example.make_histogram()

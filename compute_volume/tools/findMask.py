@@ -55,5 +55,5 @@ class FindMask:
         return mask, masked_data
 
 if __name__ == "__main__":
-    example = FindMask('cup_example.npy')
+    example = FindMask('cup_example2.npy')
     example.findMask()
