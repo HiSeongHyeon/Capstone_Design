@@ -31,7 +31,26 @@ class Calibration:
         cv.imwrite('cali_08.jpg', binary_data)
         print("Binary data saved to binary_data.jpg")
         return binary_data
+    def can_calib(self, file_path):
+        #이미지를 받아 캘리브레이션 패턴을 찾는지 확인해주는 함수
+        image = cv.imread(file_path, cv.IMREAD_GRAYSCALE)
+        pattern_size = (4, 7)  # 체스보드 패턴의 내부 코너 수
+        ret, corners = cv.findChessboardCorners(image, pattern_size, None)
+        #캘리브레이션 패턴이 발견되었는지 여부와 코너 좌표 반환
+        if ret:
+            cv.drawChessboardCorners(image, pattern_size, corners, ret)
+            cv.imshow('Calibration Pattern', image)
+            cv.waitKey(0)
+            cv.destroyAllWindows()
+        else:
+            print("Calibration pattern not found.")
+        return ret, corners
+
 if __name__ == "__main__":
     calib = Calibration('./example/smoothed_cali_08.npy')
-    calib.save_normalized('./example/normalized_cali_08.npy')
-    calib.convert2binary(328)
+    # calib.save_normalized('./example/normalized_cali_08.npy')
+    # calib.convert2binary(328)
+    for i in range(8):
+        found, corners = calib.can_calib(f'cali_0{i}.jpg')
+        if found:
+            print("Calibration pattern found.")
