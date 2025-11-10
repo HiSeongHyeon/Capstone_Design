@@ -43,6 +43,6 @@ class depthMap:
         plt.close()
 
 if __name__ == "__main__":
-    example = depthMap('./example/1103/calibration_03.npy')
+    example = depthMap('masked_depth.npy')
     example.make_depth_Map()
     example.make_histogram()

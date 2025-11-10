@@ -50,10 +50,11 @@ class Smooth:
         smoothed = cv.GaussianBlur(self.data, (3, 3), 0)
         return smoothed
 
+
     def save_smoothed(self, save_path):
         smoothed_data = self.smooth_data()
         np.save(save_path, smoothed_data)
         print(f"Smoothed data saved to {save_path}")
 if __name__ == "__main__":
-    smoother = Smooth('./example/cali_08.npy')
-    smoother.save_smoothed('./example/smoothed_cali_08.npy')
+    smoother = Smooth('./example/385_cup.npy')
+    smoother.save_smoothed('./example/smoothed_385_cup.npy')
