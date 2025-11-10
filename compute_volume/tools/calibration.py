@@ -29,8 +29,8 @@ class Calibration:
             lowest_10 = 0 # 데이터가 부족할 경우 기본값 사용
             
         # lowest_50 보다 작은 값들은 삭제, 100*255/4000 값보다 큰 값들도 삭제
-        norm_data[norm_data < lowest_10] = 0
-        norm_data[norm_data > (lowest_10 + 300)] = 0
+        #norm_data[norm_data < lowest_10] = 0
+        #norm_data[norm_data > (lowest_10 + 300)] = 0
         # norm_data[norm_data > (100*255/4000)] = 0
         return norm_data#*4000/255
     
@@ -68,7 +68,7 @@ class Calibration:
             print(f"Error: Could not read image from {file_path}")
             return False, None, None # 3개의 값 반환
 
-        pattern_size = (7, 4)  # 체스보드 패턴의 내부 코너 수
+        pattern_size = (19, 14)  # 체스보드 패턴의 내부 코너 수
         ret, corners = cv.findChessboardCorners(image, pattern_size, None)
         
         # 코너를 컬러로 그리기 위해 BGR 이미지로 변환
@@ -113,22 +113,22 @@ if __name__ == "__main__":
     print("--- Starting Camera Calibration ---")
     
     # 실제 체스보드 패턴의 3D 좌표 생성 (모든 이미지에 동일하게 적용됨)
-    objp = np.zeros((4*7, 3), np.float32)
-    objp[:, :2] = np.mgrid[0:7, 0:4].T.reshape(-1, 2)
-    objp *= 10  # 체스보드 각 사각형의 크기 (단위: mm)
+    objp = np.zeros((14*19, 3), np.float32)
+    objp[:, :2] = np.mgrid[0:19, 0:14].T.reshape(-1, 2)
+    objp *= 9  # 체스보드 각 사각형의 크기 (단위: mm)
 
     all_objpoints = []  # 모든 이미지의 3D 점들을 담을 리스트
     all_imgpoints = []  # 모든 이미지의 2D 점들(코너)을 담을 리스트
     
     image_size = (240, 180)  # 이미지 크기 (너비, 높이). 이 크기가 정확한지 확인하세요.
-    num_images = 4           # 사용할 이미지 개수 (00, 01, 02, 03)
+    num_images = 8           # 사용할 이미지 개수 (00, 01, 02, 03)
 
     # Calibration 객체 생성. (이제 .jpg 경로를 넣어도 __init__에서 오류가 나지 않음)
     # 이 객체는 can_calib와 calibrate_camera 메서드를 호출하기 위해 사용됩니다.
-    calib = Calibration('./example/1104/found_image/grayscale_calibration_01.jpg')
+    calib = Calibration('./example/1110/calibration_00.jpg')
 
     for i in range(num_images):
-        image_file_path = f'./example/1104/found_image/grayscale_calibration_{i:02d}.jpg'
+        image_file_path = f'./example/1110/calibration_{i:02d}.jpg'
         print(f"Processing {image_file_path}...")
         
         # can_calib를 호출하여 코너 찾기
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     # 루프가 끝난 후, 수집된 포인트가 있는지 확인
     if len(all_imgpoints) > 0:
         # 수집된 모든 포인트 리스트를 calibrate_camera에 전달
-        calib.calibrate_camera(all_objpoints, all_imgpoints, image_size, './example/1104/camera_calibration_data.npz')
+        calib.calibrate_camera(all_objpoints, all_imgpoints, image_size, './example/1110/camera_calibration_data.npz')
     else:
         print("Calibration failed: No valid chessboard patterns were found in any of the images.")
 
