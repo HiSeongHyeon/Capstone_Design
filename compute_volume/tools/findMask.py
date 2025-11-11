@@ -8,11 +8,13 @@ class FindMask:
 
     def findMask(self, shrink_pixels=10):
         # depth 데이터를 0~255로 정규화
+        self.rawData = self.rawData[20:-20,20:-20]
         norm_data = cv.normalize(self.rawData, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
-        
         # Otsu 알고리즘으로 임계값 계산
+        cv.imshow('Normalized Depth', norm_data)
         ret, otsu = cv.threshold(norm_data, -1, 255, cv.THRESH_BINARY | cv.THRESH_OTSU)
-        edges = cv.Canny(norm_data, ret * 0.5, ret)
+        edges = cv.Canny(norm_data, ret * 0.5, ret * 1.5)
+        print(f"Otsu 임계값: {ret}")
         
         cv.imshow('Edges', edges)
         cv.waitKey(0)
@@ -73,5 +75,5 @@ class FindMask:
 
 if __name__ == "__main__":
     # shrink_pixels 값으로 축소 정도 조절 (픽셀 단위)
-    example = FindMask('./example/385_cup.npy')
+    example = FindMask('./example/small_cup_4000 (2).npy') #('./example/385_cup.npy')
     example.findMask(shrink_pixels=5)  # 15픽셀 만큼 안쪽으로 축소
