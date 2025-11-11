@@ -62,7 +62,7 @@ class FindMask:
             raise ValueError("유효한 데이터가 너무 적습니다.")
         lowest_20_depths = sorted_depths[:20]
         baseline_depth = np.median(lowest_20_depths)
-        #masked_data[masked_data > 0] -= baseline_depth
+        # masked_data[masked_data > 0] -= baseline_depth
 
         if self.savedata:
             np.save('masked_depth.npy', masked_data)
