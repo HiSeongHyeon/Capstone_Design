@@ -318,7 +318,10 @@ class computeVolume:
         
         # 3D 플롯 (시각화는 여전히 절대 좌표 사용)
         print("\n3D 시각화 생성 중...")
-        # ... (plot_3d_with_measurements 호출은 동일) ...
+        # 3D 플롯 및 측정값 표시
+        print("\n3D 시각화 생성 중...")
+        diameter, height = self.plot_3d_with_measurements(scale_factor=None, 
+                                                           method_name="Method 4 (Calibration)")
         
         return total_volume
         
