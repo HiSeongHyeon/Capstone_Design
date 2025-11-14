@@ -19,18 +19,18 @@ class computeVolume:
     def __init__(self, depth_file_path, calibration_file_path=None):
         """
         Parameters:
-        - depth_file_path: depth 데이터 파일 경로
+        - depth_file_path: [수정] masked_raw_depth.npy 파일 경로
         - calibration_file_path: 캘리브레이션 파일 경로
         """
+        # [수정] self.depth_data는 이제 '마스킹된 원본' 데이터입니다.
         self.depth_data = np.load(depth_file_path)
         
-        # depth 스케일링 수정
         self.depth_scale = 1
         self.depth_data = self.depth_data * self.depth_scale
         
         self.image_height, self.image_width = self.depth_data.shape
         
-        print(f"Depth 데이터 로드 완료:")
+        print(f"Depth 데이터 로드 완료 (마스킹된 원본):")
         print(f"  Shape: {self.depth_data.shape}")
         if np.any(self.depth_data > 0):
             print(f"  Min depth: {np.min(self.depth_data[self.depth_data > 0]):.2f} mm")
@@ -39,8 +39,58 @@ class computeVolume:
             print("  Depth 데이터가 없습니다.")
         print(f"  Depth scale factor: {self.depth_scale}")
 
+        # [신규] 1. Baseline 계산 및 상대 높이 데이터 생성
+        self.compute_baseline_and_relative_depth()
+        
+        # [신규] 2. 픽셀 중심 찾기 (X, Y 변환의 기준점)
+        # find_cup_circle은 self.depth_data(원본)를 기반으로 작동하므로 수정 불필요
+        _ , self.center_pixel = self.find_cup_circle() # (cx, cy) 튜플 저장
+        
+        # [신규] 3. 원근 보정 포인트 클라우드 생성
+        # 이 함수가 self.points (N, 3) 배열을 생성합니다.
+        self.create_point_cloud_perspective_corrected()
+
+    def get_scale_factor_at_depth(self, depth_mm):
+        """[신규] 주어진 절대 깊이(mm)에 대한 mm/px 스케일 팩터를 계산합니다."""
+        # mm/px = 0.003344 * depth + 0.171625
+        return 0.003344 * depth_mm + 0.171625
+
+    def compute_baseline_and_relative_depth(self):
+        """
+        [신규] 원본 depth 데이터에서 baseline을 찾아 상대 높이로 변환합니다.
+        findMask.py에서 이동된 로직입니다.
+        
+        실행 결과:
+        - self.relative_depth_data (상대 높이 데이터)
+        - self.baseline_depth (계산된 기준점)
+        """
+        # self.depth_data는 마스킹된 '원본' 깊이 데이터입니다.
+        valid_depths = self.depth_data[self.depth_data > 0]
+        
+        if len(valid_depths) < 20:
+            print("경고: 유효한 데이터가 20개 미만입니다. Baseline을 0으로 설정합니다.")
+            self.baseline_depth = 0
+            # 원본 데이터를 복사 (이후 0 미만 값 제거 로직을 위해)
+            self.relative_depth_data = self.depth_data.copy() 
+        else:
+            sorted_depths = np.sort(valid_depths)
+            lowest_20_depths = sorted_depths[:20]
+            self.baseline_depth = np.median(lowest_20_depths)
+            print(f"계산된 Baseline Depth: {self.baseline_depth:.2f} mm")
+
+            # 상대 높이 계산 (numpy 브로드캐스팅 활용)
+            self.relative_depth_data = np.zeros_like(self.depth_data)
+            valid_mask = self.depth_data > 0
+            self.relative_depth_data[valid_mask] = self.depth_data[valid_mask] - self.baseline_depth
+        
+        # 0 미만 값 제거 (Baseline보다 낮은 노이즈 등)
+        self.relative_depth_data[self.relative_depth_data < 0] = 0
+
     def find_cup_circle(self):
-        """컵의 원형 경계를 찾아 정확한 지름을 계산"""
+        """
+        컵의 원형 경계를 찾아 중심 픽셀을 반환합니다. 
+        (원본 depth 데이터 기준)
+        """
         valid_mask = (self.depth_data > 0).astype(np.uint8)
         
         if not np.any(valid_mask):
@@ -62,10 +112,12 @@ class computeVolume:
                 ellipse = cv.fitEllipse(largest_contour)
                 center, (width, height), angle = ellipse
                 diameter_pixels = (width + height) / 2
+                center_x, center_y = center
             else:
                 diameter_pixels = radius * 2
+                center_x, center_y = x, y
                 
-            return diameter_pixels, (x, y)
+            return diameter_pixels, (center_x, center_y) # (지름, (cx, cy))
         
         y_indices, x_indices = np.where(valid_mask)
         if len(y_indices) == 0:
@@ -73,34 +125,53 @@ class computeVolume:
 
         diameter_pixels = max(x_indices.max() - x_indices.min(), 
                               y_indices.max() - y_indices.min())
-        center = ((x_indices.max() + x_indices.min())/2, 
-                  (y_indices.max() + y_indices.min())/2)
+        center_x = (x_indices.max() + x_indices.min())/2
+        center_y = (y_indices.max() + y_indices.min())/2
         
-        return diameter_pixels, center
+        return diameter_pixels, (center_x, center_y)
 
-    def create_point_cloud(self, scale_factor=None, cup_diameter_mm=87):
-        """포인트 클라우드 생성"""
-        valid_mask = self.depth_data > 0
+    def create_point_cloud_perspective_corrected(self):
+        """
+        [신규] 픽셀별 깊이를 고려한 원근 보정 포인트 클라우드 생성
+        
+        - X, Y (mm) = (x_px - cx_px) * scale_factor(z_abs)
+        - Z (mm)    = z_abs - z_baseline
+        
+        결과를 self.points에 저장합니다.
+        """
+        
+        # 1. 유효한 픽셀 인덱스 (y, x) 찾기
+        # '상대 높이'가 0보다 큰 지점을 유효한 포인트로 간주
+        valid_mask = self.relative_depth_data > 0
         y_indices, x_indices = np.where(valid_mask)
-        z_values = self.depth_data[valid_mask]
         
-        if scale_factor is None:
-            pixel_diameter, center = self.find_cup_circle()
-            print(f"컵 픽셀 직경: {pixel_diameter:.2f} px")
-            if pixel_diameter == 0: pixel_diameter = 1 # 0으로 나누기 방지
-            scale_factor = cup_diameter_mm / pixel_diameter
-        else:
-            pixel_diameter, center = self.find_cup_circle()
-            print(f"사용자 지정 스케일 팩터: {pixel_diameter:.2f} mm/px")
+        if len(y_indices) == 0:
+            print("포인트 클라우드 생성 실패: 유효한 데이터 없음")
+            self.points = np.array([]) # 빈 배열 초기화
+            return
 
+        # 2. Z축 값 (상대 높이)
+        z_values_relative = self.relative_depth_data[valid_mask]
         
-        points = np.column_stack([
-            (x_indices - center[0]) * scale_factor,
-            (y_indices - center[1]) * scale_factor,
-            z_values
-        ])
+        # 3. X, Y 스케일링을 위한 '절대 높이'
+        z_values_absolute = self.depth_data[valid_mask]
         
-        return points, scale_factor
+        # 4. 픽셀별 스케일 팩터 계산 (벡터화 연산)
+        # (N,) 형태의 배열이 생성됨
+        scale_factors = self.get_scale_factor_at_depth(z_values_absolute)
+        
+        # 5. 픽셀 중심 (미리 계산됨)
+        cx, cy = self.center_pixel
+        
+        # 6. X, Y 좌표 계산 (벡터화)
+        # x_mm = (x_pixel - cx) * (mm/px)
+        x_mm = (x_indices - cx) * scale_factors
+        y_mm = (y_indices - cy) * scale_factors
+        
+        # (N, 3) 형태의 포인트 클라우드 생성
+        self.points = np.column_stack([x_mm, y_mm, z_values_relative])
+        
+        print(f"원근 보정 포인트 클라우드 생성 완료. (포인트 {len(self.points)}개)")
 
     def plot_mesh_comparison(self, meshes, volumes, method_names):
         """
@@ -140,8 +211,12 @@ class computeVolume:
             elif plot_type == 'points':
                 # 포인트가 너무 많으면 느리므로 샘플링 (e.g., 20000개)
                 sample_size = min(20000, len(vertices))
-                idx = np.random.choice(len(vertices), sample_size, replace=False)
-                sampled_points = vertices[idx]
+                if len(vertices) > sample_size:
+                    idx = np.random.choice(len(vertices), sample_size, replace=False)
+                    sampled_points = vertices[idx]
+                else:
+                    sampled_points = vertices
+                    
                 ax.scatter(sampled_points[:, 0], sampled_points[:, 1], sampled_points[:, 2], 
                            c=sampled_points[:, 2], cmap='viridis', s=0.1, alpha=0.5)
 
@@ -163,8 +238,11 @@ class computeVolume:
                             cmap='viridis', s=1)
             elif plot_type == 'points':
                 sample_size = min(20000, len(vertices))
-                idx = np.random.choice(len(vertices), sample_size, replace=False)
-                sampled_points = vertices[idx]
+                if len(vertices) > sample_size:
+                    idx = np.random.choice(len(vertices), sample_size, replace=False)
+                    sampled_points = vertices[idx]
+                else:
+                    sampled_points = vertices
                 ax2.scatter(sampled_points[:, 0], sampled_points[:, 1], c=sampled_points[:, 2], 
                             cmap='viridis', s=0.1, alpha=0.5)
             
@@ -182,8 +260,11 @@ class computeVolume:
                             cmap='viridis', s=1)
             elif plot_type == 'points':
                 sample_size = min(20000, len(vertices))
-                idx = np.random.choice(len(vertices), sample_size, replace=False)
-                sampled_points = vertices[idx]
+                if len(vertices) > sample_size:
+                    idx = np.random.choice(len(vertices), sample_size, replace=False)
+                    sampled_points = vertices[idx]
+                else:
+                    sampled_points = vertices
                 ax3.scatter(sampled_points[:, 0], sampled_points[:, 2], c=sampled_points[:, 2], 
                             cmap='viridis', s=0.1, alpha=0.5)
 
@@ -197,64 +278,54 @@ class computeVolume:
         plt.savefig('mesh_comparison.png', dpi=150, bbox_inches='tight')
         plt.show()
 
-    # Method 1: 구분구적법 (포인트 클라우드 반환)
-    def estimate_cup_volume_improved(self, cup_diameter_mm=85):
+    # Method 1: 구분구적법
+    def estimate_cup_volume_improved(self):
         """
-        개선된 구분구적 방법 (시각화를 위해 포인트 클라우드 반환)
+        [수정] 개선된 구분구적 방법 (픽셀별 면적 고려)
+        (시각화를 위해 self.points를 반환하지만, 계산은 원본 데이터를 사용)
         """
-        valid_mask = self.depth_data > 0
+        valid_mask = self.relative_depth_data > 0
         if not np.any(valid_mask):
             print("구분구적법 실패: 유효한 데이터 없음")
             return 0, None
 
-        y_indices, x_indices = np.where(valid_mask)
-        z_values = self.depth_data[valid_mask]
+        # Z값 (상대 높이)
+        z_values_relative = self.relative_depth_data[valid_mask]
         
-        pixel_diameter, center = self.find_cup_circle()
-        print(f"컵 픽셀 직경: {pixel_diameter:.2f} px")
-        if pixel_diameter == 0: pixel_diameter = 1 # 0으로 나누기 방지
+        # 스케일 계산을 위한 절대 높이
+        z_values_absolute = self.depth_data[valid_mask]
         
-        scale_factor = cup_diameter_mm / pixel_diameter
-        print(f"Scale factor (Riemann): {scale_factor}")
+        # 픽셀별 스케일 팩터 및 면적 계산
+        scale_factors = self.get_scale_factor_at_depth(z_values_absolute)
         
-        pixel_area = scale_factor * scale_factor
-        total_volume = np.sum(z_values) * pixel_area
+        # pixel_area (mm^2) = (mm/px) * (mm/px)
+        pixel_areas_mm2 = scale_factors * scale_factors
         
-        # 포인트 클라우드 생성 (시각화용)
-        points = np.column_stack([
-            (x_indices - center[0]) * scale_factor,
-            (y_indices - center[1]) * scale_factor,
-            z_values
-        ])
+        # 픽셀별 부피 = 높이(mm) * 면적(mm^2)
+        pixel_volumes = z_values_relative * pixel_areas_mm2
         
-        return total_volume, points  # (부피, 포인트 클라우드)
+        total_volume = np.sum(pixel_volumes)
+        
+        # 시각화를 위해 미리 계산된 self.points 반환
+        return total_volume, self.points
 
-    # Method 4: RBF Interpolation (번호 수정됨)
-    def volume_rbf_interpolation(self, cup_diameter_mm=87):
-        """RBF 보간을 이용한 표면 재구성"""
+    # Method 4: RBF Interpolation
+    def volume_rbf_interpolation(self):
+        """[수정] RBF 보간 (원근 보정된 self.points 사용)"""
         try:
-            valid_mask = self.depth_data > 0
-            if not np.any(valid_mask):
-                print("RBF 실패: 유효한 데이터 없음")
+            if len(self.points) < 4:
+                print("RBF 실패: 유효한 데이터 포인트 부족 (4개 미만)")
                 return 0, None
 
-            y_indices, x_indices = np.where(valid_mask)
-            z_values = self.depth_data[valid_mask]
+            # [수정] self.points에서 직접 다운샘플링
+            sample_size = min(10000, len(self.points))
+            indices = np.random.choice(len(self.points), sample_size, replace=False)
+            sampled_points = self.points[indices]
             
-            pixel_diameter, center = self.find_cup_circle()
-            print(f"컵 픽셀 직경: {pixel_diameter:.2f} px")
-            if pixel_diameter == 0: pixel_diameter = 1
-            
-            scale_factor = cup_diameter_mm / pixel_diameter
-            
-            # 데이터 다운샘플링 (RBF는 많은 점에서 느림)
-            sample_size = min(10000, len(z_values))
-            indices = np.random.choice(len(z_values), sample_size, replace=False)
-            
-            x_centered = (x_indices[indices] - center[0]) * scale_factor
-            y_centered = (y_indices[indices] - center[1]) * scale_factor
-            z_sampled = z_values[indices]
-            
+            x_centered = sampled_points[:, 0]
+            y_centered = sampled_points[:, 1]
+            z_sampled = sampled_points[:, 2]
+
             if len(z_sampled) < 4:
                 print("RBF 실패: 보간에 필요한 최소 데이터 포인트 부족")
                 return 0, None
@@ -314,7 +385,6 @@ class computeVolume:
             print(f"RBF Interpolation 실패: {e}")
             return 0, None
 
-    # [수정] 새 함수: 기울어진 뚜껑(Lid) 추가
     def add_tilted_lid_to_mesh(self, mesh):
         """
         메시의 2D Convex Hull에 해당하는 3D 정점들을 찾아
@@ -343,6 +413,38 @@ class computeVolume:
             # RBF 그리드 정점(vertices)에서 2D 헐(hull)의 경계에 해당하는 3D 정점(rim_points)을 추출
             rim_indices = hull_2d.vertices
             rim_points = vertices[rim_indices] # (N, 3)
+# [RBF_mesh.py]의 add_tilted_lid_to_mesh 함수 내부
+
+            # ... (이전 코드) ...
+            
+            # RBF 그리드 정점(vertices)에서 2D 헐(hull)의 경계에 해당하는 3D 정점(rim_points)을 추출
+            rim_indices = hull_2d.vertices
+            rim_points = vertices[rim_indices] # (N, 3)
+            
+            # ======================================================
+            # [여기에 아래 코드 삽입]
+            # 림 직경(mm)을 계산하고 출력합니다.
+            try: 
+                rim_xy = rim_points[:, :2] # 림의 X, Y 좌표 (mm)
+                x_min, y_min = np.min(rim_xy, axis=0)
+                x_max, y_max = np.max(rim_xy, axis=0)
+                diameter_x = x_max - x_min
+                diameter_y = y_max - y_min
+                
+                print("\n" + "=" * 30)
+                print("--- 림(Rim) 직경 측정 (mm) ---")
+                print(f"  측정된 림 X-직경: {diameter_x:.2f} mm")
+                print(f"  측정된 림 Y-직경: {diameter_y:.2f} mm")
+                print(f"  측정된 림 평균 직경: {((diameter_x + diameter_y) / 2):.2f} mm")
+                print("=" * 30 + "\n")
+
+            except Exception as e:
+                print(f"[림 직경 측정 중 오류]: {e}")
+            # [삽입 코드 끝]
+            # ======================================================
+
+
+            # ... (이후 코드 계속) ...
             
             if len(rim_points) < 3:
                  print("뚜껑 추가 실패: Rim 포인트 부족 (3개 미만)")
@@ -396,13 +498,13 @@ class computeVolume:
             print(f"기울어진 뚜껑 추가 중 오류: {e}")
             return mesh # 오류 발생 시 원본 메쉬 반환
 
-    def compare_all_methods(self, cup_diameter_mm=87):
+    def compare_all_methods(self): # [수정] cup_diameter_mm 인자 제거
         """모든 방법 비교"""
         print("=" * 80)
-        print("Arducam Depth Camera - 부피 계산 방법 비교")
+        print("Arducam Depth Camera - 부피 계산 방법 비교 (원근 보정 적용됨)")
         print("=" * 80)
         print(f"실제 부피: 385 mL")
-        print(f"컵 직경 설정: {cup_diameter_mm} mm")
+        # print(f"컵 직경 설정: {cup_diameter_mm} mm") # [삭제]
         print("=" * 80)
         
         methods = []
@@ -411,7 +513,7 @@ class computeVolume:
         
         # Method 1: 구분구적법
         print("\n1. 구분구적법 (Riemann Sum)...")
-        vol1, data1 = self.estimate_cup_volume_improved(cup_diameter_mm)
+        vol1, data1 = self.estimate_cup_volume_improved() # [수정] 인자 제거
         methods.append("Riemann Sum")
         volumes.append(vol1)
         meshes.append(data1) # data1은 np.ndarray (포인트 클라우드)
@@ -420,7 +522,7 @@ class computeVolume:
         
         # Method 2: RBF
         print("\n2. RBF Interpolation...")
-        vol4, data4 = self.volume_rbf_interpolation(cup_diameter_mm)
+        vol4, data4 = self.volume_rbf_interpolation() # [수정] 인자 제거
         methods.append("RBF")
         volumes.append(vol4)
         meshes.append(data4) # data4는 trimesh.Trimesh
@@ -526,17 +628,16 @@ class computeVolume:
 
 if __name__ == "__main__":
     try:
-        # 기존 파일이 있는지 확인
+        # [수정] 'masked_raw_depth.npy' 파일을 로드하도록 변경
         np.load('masked_depth.npy')
     except FileNotFoundError:
-        # 오류 출력
-        raise FileNotFoundError("masked_depth.npy 파일이 없습니다. 해당 파일을 준비해주세요.")
+        raise FileNotFoundError("masked_depth.npy 파일이 없습니다. 먼저 findMask.py를 실행해주세요.")
     
-    # 컴퓨터 객체 생성
+    # [수정] 입력 파일 이름 변경
     example = computeVolume('masked_depth.npy')
-    # example = computeVolume('./example/perspective_data/perspective_00.npy')
-    # 모든 방법 비교 실행
-    methods, volumes, meshes = example.compare_all_methods(cup_diameter_mm=80)
+    
+    # [수정] compare_all_methods에서 인자 제거
+    methods, volumes, meshes = example.compare_all_methods()
     
     # 메시 파일로 저장
     print("\n메시/포인트 클라우드 파일 저장 중...")

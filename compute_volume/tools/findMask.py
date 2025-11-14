@@ -64,8 +64,10 @@ class FindMask:
             raise ValueError("유효한 데이터가 너무 적습니다.")
         lowest_20_depths = sorted_depths[:20]
         baseline_depth = np.median(lowest_20_depths)
-        masked_data[masked_data > 0] -= baseline_depth
+        # masked_data[masked_data > 0] -= baseline_depth
+        # print(f"기준점 보정값: {baseline_depth:.2f} mm")
         masked_data[masked_data < 0] = 0  # 
+        print(baseline_depth)
 
         if self.savedata:
             np.save('masked_depth.npy', masked_data)
@@ -76,5 +78,5 @@ class FindMask:
 
 if __name__ == "__main__":
     # shrink_pixels 값으로 축소 정도 조절 (픽셀 단위)
-    example = FindMask('./example/avg_cup.npy') #('./example/385_cup.npy')
-    example.findMask(shrink_pixels=1)  # 1픽셀 만큼 안쪽으로 축소
+    example = FindMask('./example/1113/dojagi.npy') #('./example/385_cup.npy')
+    example.findMask(shrink_pixels=3)  # 1픽셀 만큼 안쪽으로 축소
