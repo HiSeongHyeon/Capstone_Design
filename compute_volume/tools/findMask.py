@@ -65,7 +65,7 @@ class FindMask:
         lowest_20_depths = sorted_depths[:20]
         baseline_depth = np.median(lowest_20_depths)
         # masked_data[masked_data > 0] -= baseline_depth
-        # print(f"기준점 보정값: {baseline_depth:.2f} mm")
+        print(f"기준점 보정값: {baseline_depth:.2f} mm")
         masked_data[masked_data < 0] = 0  # 
         print(baseline_depth)
 
