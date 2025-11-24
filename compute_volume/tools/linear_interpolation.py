@@ -101,7 +101,7 @@ class FindMask:
 if __name__ == "__main__":
     
     # --- 설정 값 ---
-    shrink_val = 3
+    shrink_val = 5
     target_directory = './example/perspective_data'
     REAL_DIAMETER_MM = 70.0 # 컵의 실제 지름 (mm)
     SHOW_IMAGES_PER_FILE = False # False로 설정해야 배치 처리 중단 없음

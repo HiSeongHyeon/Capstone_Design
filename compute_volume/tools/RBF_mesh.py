@@ -536,7 +536,7 @@ if __name__ == "__main__":
     example = computeVolume('masked_depth.npy')
     # example = computeVolume('./example/perspective_data/perspective_00.npy')
     # 모든 방법 비교 실행
-    methods, volumes, meshes = example.compare_all_methods(cup_diameter_mm=80)
+    methods, volumes, meshes = example.compare_all_methods(cup_diameter_mm=70)
     
     # 메시 파일로 저장
     print("\n메시/포인트 클라우드 파일 저장 중...")
