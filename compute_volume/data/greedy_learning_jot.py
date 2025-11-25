@@ -156,7 +156,7 @@ y_tensor = torch.from_numpy(y_scaled)
 # 4. 학습 (Training)
 # ==========================================
 model = FullPhysicalModel()
-optimizer = optim.Adam(model.parameters(), lr=0.005)
+optimizer = optim.Adam(model.parameters(), lr=0.0005)
 
 print("\n[풀 옵션 모델 학습 시작]")
 epochs = 15000
