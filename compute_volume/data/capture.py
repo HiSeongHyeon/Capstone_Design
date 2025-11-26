@@ -1,9 +1,10 @@
 import cv2
 import numpy as np
 import ArducamDepthCamera as ac
+import time  # 시간 측정을 위해 추가
 
 # MAX_DISTANCE value modifiable  is 2000 or 4000
-MAX_DISTANCE=4000
+MAX_DISTANCE = 2000
 
 
 class UserRect:
@@ -113,6 +114,7 @@ def main():
         )
 
     while True:
+        # 일반 프리뷰용 프레임 요청
         frame = cam.requestFrame(2000)
         if frame is not None and isinstance(frame, ac.DepthData):
             depth_buf = frame.depth_data
@@ -137,6 +139,36 @@ def main():
         key = cv2.waitKey(1)
         if key == ord("q"):
             break
+        
+        # 's' 키를 눌렀을 때 0.3초간 데이터 수집 및 평균 저장 로직
+        elif key == ord("s"):
+            print("Start capturing for 0.3 seconds...")
+            captured_frames = []
+            start_time = time.time()
+            
+            # 0.3초 동안 루프를 돌며 가능한 많은 프레임을 수집
+            while (time.time() - start_time) < 0.3:
+                # 빠른 수집을 위해 timeout을 짧게 설정 (예: 100ms)
+                frame_tmp = cam.requestFrame(100)
+                if frame_tmp is not None and isinstance(frame_tmp, ac.DepthData):
+                    # C++ 버퍼 포인터 문제가 생기지 않도록 .copy()를 사용하여 깊은 복사 수행
+                    captured_frames.append(frame_tmp.depth_data.copy())
+                    cam.releaseFrame(frame_tmp)
+            
+            if captured_frames:
+                # (N, H, W) 형태의 배열을 시간 축(axis=0) 기준으로 평균 계산
+                # 제공해주신 샘플 데이터와 동일하게 float32 타입으로 변환
+                avg_depth = np.mean(captured_frames, axis=0).astype(np.float32)
+                
+                timestamp = int(time.time())
+                filename = f"depth_avg_{timestamp}.npy"
+                
+                # .npy 포맷으로 저장
+                np.save(filename, avg_depth)
+                print(f"Saved: {len(captured_frames)} frames averaged to '{filename}'")
+                print(f"Data Shape: {avg_depth.shape}, Dtype: {avg_depth.dtype}")
+            else:
+                print("Warning: No frames captured during the interval.")
 
     cam.stop()
     cam.close()
