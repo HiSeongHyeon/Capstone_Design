@@ -337,13 +337,13 @@ if __name__ == "__main__":
     # A. 모델 학습 및 저장
     # 데이터가 있는 경우에만 실행
     if len(glob.glob('*.npy')) > 5:
-        train_pipeline(epochs=5000, save_path='my_cup_model.pth')
+        train_pipeline(epochs=10000, save_path='my_cup_model.pth')
 
         # B. 추론 (Inference) 테스트
         print("\n[Test] Running Inference...")
         estimator = VolumeEstimator('my_cup_model.pth')
         
-        test_files = glob.glob('*.npy')[:3]
+        test_files = glob.glob('*.npy')[:]
         for f in test_files:
             result = estimator.predict(f)
             print(f"File: {os.path.basename(f)} -> {result['volume_ml']}ml ({result['mode']})")

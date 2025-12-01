@@ -3,12 +3,12 @@ import os
 import datetime
 import time
 import numpy as np
-import serial # [추가] 시리얼 통신 라이브러리
-import serial.tools.list_ports # [추가] 포트 자동 찾기
+import serial
+import serial.tools.list_ports
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QGridLayout, QFrame, QSizePolicy, QGraphicsDropShadowEffect, QMessageBox)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer  # [추가] QTimer 임포트
 from PyQt5.QtGui import QFont, QColor, QFontDatabase
 
 # === Arducam 라이브러리 임포트 시도 ===
@@ -69,6 +69,7 @@ class ModernDispenserUI(QMainWindow):
         # === 상태 관리 ===
         self.current_mode = 'VOLUME'  
         self.current_value = 120.0    
+        self.is_dispensing = False # [추가] 출수 중인지 확인하는 플래그
         
         self.init_inference_engine()
         self.init_ui()
@@ -82,17 +83,14 @@ class ModernDispenserUI(QMainWindow):
     def init_serial_connection(self):
         """아두이노와 시리얼 연결 시도"""
         try:
-            # 사용 가능한 포트 검색 (Arduino 또는 USB Serial 장치 찾기)
             ports = list(serial.tools.list_ports.comports())
             target_port = None
             
             for p in ports:
-                # 라즈베리파이에서 아두이노는 보통 ttyACM* 또는 ttyUSB*로 잡힘
                 if "Arduino" in p.description or "ttyACM" in p.device or "ttyUSB" in p.device:
                     target_port = p.device
                     break
             
-            # 포트를 못 찾았으면 기본값 시도
             if target_port is None:
                 target_port = '/dev/ttyUSB0' 
 
@@ -176,6 +174,7 @@ class ModernDispenserUI(QMainWindow):
             QPushButton[class="control_button"]:pressed {{
                 background-color: #E5F1FF;
             }}
+            /* 기본 파란색 버튼 스타일 */
             QPushButton#dispense_button {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00C6FF, stop:1 #0072FF);
                 border: none;
@@ -187,6 +186,14 @@ class ModernDispenserUI(QMainWindow):
             }}
             QPushButton#dispense_button:pressed {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0055FF, stop:1 #0044CC);
+            }}
+            /* 정지 상태일 때 빨간색 스타일 */
+            QPushButton#dispense_button[state="stop"] {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FF453A, stop:1 #FF3B30);
+                border: 2px solid #FF3B30;
+            }}
+            QPushButton#dispense_button[state="stop"]:pressed {{
+                background: #D70015;
             }}
         """)
 
@@ -353,6 +360,10 @@ class ModernDispenserUI(QMainWindow):
         return btn
 
     def set_mode(self, mode, value):
+        # 출수 중일 때는 모드 변경 막기
+        if self.is_dispensing:
+            return
+            
         self.current_mode = mode
         self.current_value = float(value)
         self.update_display()
@@ -374,6 +385,8 @@ class ModernDispenserUI(QMainWindow):
                     break
 
     def adjust_value(self, direction):
+        if self.is_dispensing: return # 출수 중 조작 금지
+
         if self.current_mode == 'RATIO':
             new_val = self.current_value + (0.1 * direction)
             new_val = max(0.1, min(1.0, new_val))
@@ -458,9 +471,19 @@ class ModernDispenserUI(QMainWindow):
             print("[시리얼] 아두이노가 연결되지 않았습니다.")
 
     def process_dispense_sequence(self):
+        # [수정] 출수 중이면 정지 신호(-1)를 보내고 초기화
+        if self.is_dispensing:
+            print("[시스템] 사용자 중지 요청!")
+            self.send_to_arduino(-1) # 아두이노에 정지 신호 전송
+            self.reset_ui_state()    # UI 즉시 초기화
+            return
+
+        # === 정상 출수 프로세스 시작 ===
         original_text = self.lbl_status.text()
         self.lbl_status.setText("SCANNING...")
-        self.btn_pour.setEnabled(False)
+        
+        # 버튼을 비활성화하지 않고 처리 중임을 표시만 함 (중간에 끄면 안되므로 스캔 중에는 클릭 방지 필요할 수 있으나 UX상 유지)
+        self.btn_pour.setEnabled(False) 
         self.btn_pour.setText("Processing...")
         QApplication.processEvents() 
 
@@ -469,7 +492,7 @@ class ModernDispenserUI(QMainWindow):
         
         if not success and CAMERA_AVAILABLE:
             QMessageBox.warning(self, "오류", "카메라 촬영에 실패했습니다.")
-            self.reset_ui_state(original_text)
+            self.reset_ui_state()
             return
 
         # 2. 추론
@@ -497,7 +520,6 @@ class ModernDispenserUI(QMainWindow):
             self.lbl_main_value.setText(f"{int(final_volume_ml)}")
             self.lbl_unit.setText("ml (Auto)")
             QApplication.processEvents()
-            time.sleep(1) 
         else:
             final_volume_ml = self.current_value
             print(f"[출수] 모드: MANUAL | 설정: {final_volume_ml}ml")
@@ -505,12 +527,37 @@ class ModernDispenserUI(QMainWindow):
         # 4. 아두이노로 전송
         self.send_to_arduino(final_volume_ml)
         
-        self.reset_ui_state(original_text)
+        # [수정] 전송 후 버튼을 '정지(STOP)' 상태로 변경
+        self.enable_stop_mode()
 
-    def reset_ui_state(self, original_status_text):
+    def enable_stop_mode(self):
+        """UI를 출수 중(정지 가능) 상태로 변경"""
+        self.is_dispensing = True
+        self.btn_pour.setEnabled(True)
+        self.btn_pour.setText("STOP (정지)")
+        self.btn_pour.setProperty("state", "stop") # 스타일 변경용 속성
+        self.btn_pour.style().polish(self.btn_pour) # 스타일 즉시 적용
+        
+        self.lbl_status.setText("DISPENSING...")
+        self.lbl_status.setStyleSheet("color: #FF3B30; letter-spacing: 1px;")
+
+        # [추가] 안전장치: 사용자가 안 눌러도 15초 후에는 자동으로 원래대로 복귀
+        QTimer.singleShot(15000, self.auto_reset_check)
+
+    def auto_reset_check(self):
+        """타이머에 의해 호출됨: 아직도 출수 중 상태면 리셋"""
+        if self.is_dispensing:
+            print("[시스템] 타임아웃: UI 자동 초기화")
+            self.reset_ui_state()
+
+    def reset_ui_state(self, original_status_text=None):
+        self.is_dispensing = False
         self.btn_pour.setText("SCAN & DISPENSE")
         self.btn_pour.setEnabled(True)
-        self.update_display() 
+        self.btn_pour.setProperty("state", "normal") # 스타일 복구
+        self.btn_pour.style().polish(self.btn_pour)
+        
+        self.update_display() # 원래 문구 복구
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
