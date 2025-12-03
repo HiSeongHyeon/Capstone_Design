@@ -1,20 +1,16 @@
 import numpy as np
-import glob
 import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+import glob
 from skimage import measure, morphology
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Dict, Union
 
 # ==========================================================
-# [설정] 고정 ROI 및 하이퍼파라미터
+# [설정] 고정 ROI (학습 코드와 동일해야 함)
 # ==========================================================
 FIXED_ROI = (14, 30, 165, 151)
 
 class FeatureExtractor:
-    """학습/추론 공용 특징 추출기 (변경 시 추론 코드도 동일하게 변경 필요)"""
+    """학습 코드와 완전히 동일한 로직을 가진 특징 추출기"""
     def __init__(self, shrink_ratio: float = 0.02):
         self.shrink_ratio = shrink_ratio
 
@@ -28,7 +24,6 @@ class FeatureExtractor:
             else: data = filename_or_data
         except: return None
         
-        # ROI Crop
         if roi is not None:
             x, y, w, h = roi
             h_img, w_img = data.shape
@@ -40,7 +35,6 @@ class FeatureExtractor:
         valid_data = data[data > 0]
         if len(valid_data) == 0: return None
 
-        # Masking
         thresh = 1.5*np.mean(valid_data) + 0.2 * np.std(valid_data)
         mask = data < thresh
         mask = morphology.binary_opening(mask, morphology.disk(1))
@@ -51,7 +45,6 @@ class FeatureExtractor:
         props = measure.regionprops(labels)
         largest_region = max(props, key=lambda r: r.area)
         
-        # Convex Hull & Erosion
         mask_convex = morphology.convex_hull_image(largest_region.image)
         bbox_h = largest_region.bbox[2] - largest_region.bbox[0]
         bbox_w = largest_region.bbox[3] - largest_region.bbox[1]
@@ -64,7 +57,6 @@ class FeatureExtractor:
         full_mask = np.zeros_like(mask)
         full_mask[min_r:min_r+final_mask_patch.shape[0], min_c:min_c+final_mask_patch.shape[1]] = final_mask_patch
 
-        # Features
         object_depths = data[full_mask]
         valid_depths = object_depths[object_depths > 0]
         if len(valid_depths) == 0: return None
@@ -76,7 +68,6 @@ class FeatureExtractor:
         pixel_volumes = pixel_volumes[pixel_volumes > 0]
         raw_volume_depth = np.sum(pixel_volumes) if len(pixel_volumes) > 0 else 0.0
 
-        # Geometry Logic
         z_mid = (z_rim + z_bottom) / 2.0
         top_mask = full_mask & (data < z_mid) & (data > 0)
         if np.sum(top_mask) < 50:
@@ -100,99 +91,91 @@ class FeatureExtractor:
         fill_rate = np.sum(mask) / n_convex if n_convex > 0 else 0
         z_sigma = np.std(valid_depths)
 
-        # [V_depth, V_geom, Avg_Z, Shape, View, Fill, Z_sigma]
         return [raw_volume_depth, raw_volume_geom, avg_depth, shape_factor, view_factor, fill_rate, z_sigma]
 
-class PhysicsGatedModel(nn.Module):
-    def __init__(self):
-        super().__init__()
+class NumpyVolumePredictor:
+    """PyTorch 의존성 없이 순수 NumPy로 구현된 예측 엔진"""
+    def __init__(self, model_path: str):
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"{model_path} not found.")
+        
+        # Load .npz
+        loaded = np.load(model_path, allow_pickle=True)
+        # item()을 호출해야 0-d array 내부의 딕셔너리를 꺼낼 수 있음
+        self.weights = loaded['weights'].item() 
+        self.stats = loaded['stats'].item()
+        
+    def _relu(self, x): return np.maximum(0, x)
+    
+    def _softplus(self, x): return np.log(1 + np.exp(np.clip(x, -80, 80)))
+    
+    def _sigmoid(self, x): return 1 / (1 + np.exp(-x))
+    
+    def _linear(self, x, w, b): return x @ w.T + b
+
+    def predict(self, features: List[float]) -> Dict:
+        # 1. Normalize
+        x_raw = np.array(features, dtype=np.float32)
+        x_norm = (x_raw - self.stats['mean']) / self.stats['std']
+        x_norm[0] = x_raw[0] / (self.stats['v_depth_max'] + 1e-6)
+        x_norm[1] = x_raw[1] / (self.stats['v_geom_max'] + 1e-6)
+        x = x_norm.reshape(1, -1)
+
+        # 2. Forward Pass (NumPy Implementation of PhysicsGatedModel)
+        # Indices: [V_depth, V_geom, Avg_Z, Shape, View, Fill, Z_sigma]
+        
         # Depth Expert
-        self.fc_depth = nn.Sequential(nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 1))
-        self.exp_depth = nn.Parameter(torch.tensor(1.0)) 
+        inputs_kd = x[:, [0, 2, 3, 4]]
+        h1_d = self._relu(self._linear(inputs_kd, self.weights['fc_depth.0.weight'], self.weights['fc_depth.0.bias']))
+        k_d = self._softplus(self._linear(h1_d, self.weights['fc_depth.2.weight'], self.weights['fc_depth.2.bias']))
+        
         # Geom Expert
-        self.fc_geom = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 1))
-        self.exp_geom = nn.Parameter(torch.tensor(1.0)) 
-        # Gating
-        self.gate_mlp = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 1))
-
-    def forward(self, x):
-        v_depth_raw = x[:, 0].unsqueeze(1)
-        v_geom_raw  = x[:, 1].unsqueeze(1)
-        inputs_kd = x[:, [0, 2, 3, 4]] 
         inputs_kg = x[:, [1, 4]]
+        h1_g = self._relu(self._linear(inputs_kg, self.weights['fc_geom.0.weight'], self.weights['fc_geom.0.bias']))
+        k_g = self._softplus(self._linear(h1_g, self.weights['fc_geom.2.weight'], self.weights['fc_geom.2.bias']))
+        
+        # Physics Formula
+        v_depth_base = np.maximum(x[:, 0], 1e-6)
+        v_geom_base = np.maximum(x[:, 1], 1e-6)
+        
+        pred_depth = k_d.flatten() * (v_depth_base ** self.weights['exp_depth'])
+        pred_geom = k_g.flatten() * (v_geom_base ** self.weights['exp_geom'])
+        
+        # Gating
         inputs_gate = x[:, [5, 6]]
+        h1_gate = self._relu(self._linear(inputs_gate, self.weights['gate_mlp.0.weight'], self.weights['gate_mlp.0.bias']))
+        alpha_gate = self._sigmoid(self._linear(h1_gate, self.weights['gate_mlp.2.weight'], self.weights['gate_mlp.2.bias'])).flatten()
         
-        k_d = torch.nn.functional.softplus(self.fc_depth(inputs_kd))
-        k_g = torch.nn.functional.softplus(self.fc_geom(inputs_kg))
+        final_pred_norm = (1 - alpha_gate) * pred_depth + alpha_gate * pred_geom
+        volume_ml = final_pred_norm.item() * self.stats['y_max']
         
-        v_depth_base = torch.clamp(v_depth_raw, min=1e-6)
-        v_geom_base = torch.clamp(v_geom_raw, min=1e-6)
-
-        pred_depth = k_d * (v_depth_base ** self.exp_depth)
-        pred_geom  = k_g * (v_geom_base  ** self.exp_geom)
-        
-        alpha_gate = torch.sigmoid(self.gate_mlp(inputs_gate))
-        final_pred = (1 - alpha_gate) * pred_depth + alpha_gate * pred_geom
-        return final_pred.squeeze(1), alpha_gate
-
-def train_and_export(data_dir: str = '.', epochs: int = 5000):
-    # 1. Data Preparation
-    extractor = FeatureExtractor()
-    files = glob.glob(os.path.join(data_dir, '*.npy'))
-    data_list, target_list = [], []
-    
-    print(f"[Train] Processing {len(files)} files...")
-    for f in files:
-        try:
-            vol_str = os.path.basename(f).split('_')[0]
-            if not vol_str.replace('.', '', 1).isdigit(): continue
-            feats = extractor.process(f, roi=FIXED_ROI)
-            if feats:
-                data_list.append(feats)
-                target_list.append(float(vol_str))
-        except: pass
-
-    if not data_list: print("No data found."); return
-
-    X_raw = np.array(data_list, dtype=np.float32)
-    y_raw = np.array(target_list, dtype=np.float32)
-    
-    # Stats Calculation
-    stats = {
-        'mean': X_raw.mean(axis=0), 'std': X_raw.std(axis=0) + 1e-6,
-        'v_depth_max': X_raw[:, 0].max(), 'v_geom_max': X_raw[:, 1].max(), 'y_max': y_raw.max()
-    }
-    
-    # Normalization
-    X_norm = (X_raw - stats['mean']) / stats['std']
-    X_norm[:, 0] = X_raw[:, 0] / (stats['v_depth_max'] + 1e-6)
-    X_norm[:, 1] = X_raw[:, 1] / (stats['v_geom_max'] + 1e-6)
-    y_norm = y_raw / stats['y_max']
-
-    # 2. Training
-    dataset = torch.utils.data.TensorDataset(torch.FloatTensor(X_norm), torch.FloatTensor(y_norm))
-    dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=True)
-    model = PhysicsGatedModel()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-    print("[Train] Start Loop...")
-    for epoch in range(epochs):
-        for bx, by in dataloader:
-            optimizer.zero_grad()
-            pred, _ = model(bx)
-            loss = torch.mean(torch.abs((pred - by) / (by + 1e-6)))
-            loss.backward()
-            optimizer.step()
-        if epoch % 1000 == 0: print(f"Ep {epoch}: Loss {loss.item():.4f}")
-
-    # 3. Export to NumPy (.npz)
-    print("\n[Export] Saving weights to 'model_weights.npz'...")
-    state_dict = model.state_dict()
-    numpy_weights = {k: v.cpu().detach().numpy() for k, v in state_dict.items()}
-    
-    # stats와 weights를 하나의 파일로 저장
-    np.savez('model_weights.npz', weights=numpy_weights, stats=stats)
-    print("Done. Ready for inference without PyTorch.")
+        return {
+            "volume_ml": round(volume_ml, 2),
+            "mode": "GEOM" if alpha_gate.item() > 0.5 else "DEPTH",
+            "alpha": round(alpha_gate.item(), 3)
+        }
 
 if __name__ == "__main__":
-    train_and_export(epochs=15000)
+    # Test Block
+    model_file = 'model_weights.npz'
+    if os.path.exists(model_file):
+        print("[System] Loading pure NumPy Inference Engine...")
+        predictor = NumpyVolumePredictor(model_file)
+        extractor = FeatureExtractor()
+        
+        # 현재 폴더의 .npy 파일 하나로 테스트
+        test_files = glob.glob('./glass/*.npy')
+        if test_files:
+            target_file = test_files[2]
+            print(f"[Test] Processing: {target_file}")
+            
+            feats = extractor.process(target_file, roi=FIXED_ROI)
+            if feats:
+                result = predictor.predict(feats)
+                print(f"Prediction: {result}")
+            else:
+                print("Feature extraction failed.")
+        else:
+            print("No .npy files found for testing.")
+    else:
+        print(f"Error: {model_file} not found. Run train script first.")
