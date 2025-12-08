@@ -10,7 +10,7 @@ class FindMask:
     def findMask(self, shrink_pixels=8):
         # 1. 데이터 정규화 및 전처리
         # 슬라이싱은 데이터에 따라 필요 시 조정
-        self.rawData = self.rawData[20:-20, 20:-20]
+        #self.rawData = self.rawData[20:-20, 20:-20]
         norm_data = cv.normalize(self.rawData, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
         
         # 노이즈 제거를 위해 블러링을 약간 강하게 적용
@@ -19,7 +19,7 @@ class FindMask:
         # 2. 엣지 검출 (Otsu 자동 임계값)
         high_thresh, _ = cv.threshold(blurred, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
         low_thresh = 0.5 * high_thresh
-        edges = cv.Canny(blurred, low_thresh, high_thresh)
+        edges = cv.Canny(blurred, low_thresh, 1.5*high_thresh)
         
         # 3. 컨투어 찾기 (가장 바깥쪽 외경만 찾으면 됩니다)
         contours, _ = cv.findContours(edges, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
@@ -95,10 +95,10 @@ class FindMask:
 
 if __name__ == "__main__":
     # 파일 경로를 실제 경로로 수정해주세요.
-    file_path = 'C:/Users/rngyq/Documents/Capstone_Design/compute_volume/data/567_tumbler.npy'
+    file_path = 'C:/Users/rngyq/Documents/Capstone_Design/compute_volume/data/567_tumbler_02_depth.npy'
     example = FindMask(file_path)
     
     # 핵심 튜닝 포인트: shrink_pixels
     # 이 값을 조절하여 빨간색 선이 림 안쪽으로 들어가도록 만드세요.
     # 림이 두꺼워 보이므로 8 정도로 시작해서 결과를 보고 증감시킵니다.
-    example.findMask(shrink_pixels=1)
+    example.findMask(shrink_pixels=3)

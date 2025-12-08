@@ -578,5 +578,5 @@ if __name__ == "__main__":
     
     app = QApplication(sys.argv)
     window = ModernDispenserUI()
-    window.showFullScreen() 
+    window.show()#showFullScreen()
     sys.exit(app.exec_())

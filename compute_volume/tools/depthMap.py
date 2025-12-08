@@ -54,7 +54,7 @@ class depthMap:
 
         # 컬러바 생성 (NaN 무시하고 유효 데이터 범위만 표시됨)
         fig.colorbar(surf, shrink=0.5, aspect=12, label='Depth (mm)')
-        ax.set_title('3D Depth Surface (Background Removed)')
+        #ax.set_title('3D Depth Surface (Background Removed)')
         
         fig.savefig('depthmap_final.png', dpi=300, bbox_inches='tight')
         plt.show()
@@ -72,7 +72,7 @@ class depthMap:
         plt.close()
 
 if __name__ == "__main__":
-    example = depthMap('masked_depth.npy')
-    # example = depthMap('C:/Users/rngyq/Documents/Capstone_Design/compute_volume/data/413_dojagi.npy')
+    #example = depthMap('masked_depth.npy')
+    example = depthMap('C:/Users/rngyq/Documents/Capstone_Design/compute_volume/data/567_tumbler_02_depth.npy')
     example.make_depth_Map()
     example.make_histogram()
