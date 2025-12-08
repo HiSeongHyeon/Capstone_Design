@@ -17,7 +17,7 @@ FIXED_ROI = (14, 30, 165, 151)
 
 def plot_parity(y_true, y_pred, title, filename):
     """(기존과 동일) Parity Plot 생성"""
-    plt.figure(figsize=(8, 8), dpi=100)
+    plt.figure(figsize=(10, 8), dpi=100)
     plt.scatter(y_pred, y_true, alpha=0.6, edgecolors='w', s=80, c='#007AFF')
     min_val = min(np.min(y_true), np.min(y_pred))
     max_val = max(np.max(y_true), np.max(y_pred))
@@ -25,9 +25,9 @@ def plot_parity(y_true, y_pred, title, filename):
     plt.plot([min_val - margin, max_val + margin], 
              [min_val - margin, max_val + margin], 
              'r--', lw=2, label='Ideal (y=x)')
-    plt.xlabel('Estimated Volume (ml)', fontsize=14, fontweight='bold')
-    plt.ylabel('Actual Volume (ml)', fontsize=14, fontweight='bold')
-    plt.title(title, fontsize=16, pad=15)
+    plt.xlabel('Estimated Volume (ml)', fontsize=18, fontweight='bold')
+    plt.ylabel('Actual Volume (ml)', fontsize=18, fontweight='bold')
+    plt.title(title, fontsize=20, pad=15, fontweight='bold')
     plt.legend(loc='upper left')
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.axis('equal')
@@ -44,12 +44,12 @@ def plot_learning_curves(history, filename="learning_curves.png"):
     epochs = range(1, len(history['train_loss']) + 1)
     
     # 1. 세로 길이를 조금 늘려 여백 확보 (10, 6 -> 10, 7)
-    fig, ax1 = plt.subplots(figsize=(10, 7))
+    fig, ax1 = plt.subplots(figsize=(15, 7))
 
     # 왼쪽 축: Loss (MAPE)
     color = 'tab:red'
-    ax1.set_xlabel('Epochs', fontsize=12)
-    ax1.set_ylabel('Loss (MAPE)', color=color, fontsize=12)
+    ax1.set_xlabel('Epochs', fontsize=15)
+    ax1.set_ylabel('Loss (MAPE)', color=color, fontsize=15)
     ax1.plot(epochs, history['train_loss'], color=color, alpha=0.6, label='Train Loss')
     ax1.plot(epochs, history['val_loss'], color='darkred', linestyle='--', label='Val Loss')
     ax1.tick_params(axis='y', labelcolor=color)
@@ -60,7 +60,7 @@ def plot_learning_curves(history, filename="learning_curves.png"):
     if 'val_gate_mean' in history:
         ax2 = ax1.twinx()  
         color = 'tab:blue'
-        ax2.set_ylabel('Gate Alpha (0:Depth <-> 1:Geom)', color=color, fontsize=12)
+        ax2.set_ylabel('Gate Alpha (0:Depth <-> 1:Geom)', color=color, fontsize=15)
         ax2.plot(epochs, history['val_gate_mean'], color=color, linewidth=2, label='Avg Gate (Val)')
         ax2.tick_params(axis='y', labelcolor=color)
         ax2.set_ylim(0, 1)
@@ -78,7 +78,7 @@ def plot_learning_curves(history, filename="learning_curves.png"):
                edgecolor='white')              # 깔끔하게 테두리 제거 효과
 
     # 3. 제목 위치 조정 (y 파라미터로 더 위로 올림)
-    plt.title('Training Metrics & Model Behavior', fontsize=16, fontweight='bold', y=1.12)
+    plt.title('Training Metrics & Model Behavior', fontsize=18, fontweight='bold', y=1.12)
 
     # 4. 레이아웃 여백 강제 지정 (핵심)
     # rect=[left, bottom, right, top] -> top을 0.9로 설정하여 상단 10%를 제목용으로 비워둠
@@ -276,7 +276,7 @@ def train_and_export(data_dir: str = '.', epochs: int = 5000):
 
     # 6. Training (수정됨)
     model = PhysicsGatedModel()
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.005)
 
     best_val_loss = float('inf')
     best_weights = None
@@ -361,4 +361,4 @@ def train_and_export(data_dir: str = '.', epochs: int = 5000):
     print("Done.")
 
 if __name__ == "__main__":
-    train_and_export(epochs=30000)
+    train_and_export(epochs=15000)

@@ -169,10 +169,36 @@ if __name__ == "__main__":
             target_file = test_files[2]
             print(f"[Test] Processing: {target_file}")
             
+            # [시간 측정 시작]
+            start_total = time.perf_counter()
+
+            # 1. 특징 추출 (Feature Extraction) 시간 측정
+            t_extract_start = time.perf_counter()
             feats = extractor.process(target_file, roi=FIXED_ROI)
+            t_extract_end = time.perf_counter()
+
             if feats:
+                # 2. 추론 (Inference) 시간 측정
+                t_infer_start = time.perf_counter()
                 result = predictor.predict(feats)
+                t_infer_end = time.perf_counter()
+                
+                # 전체 종료 시간
+                end_total = time.perf_counter()
+
+                # 시간 계산 (초 단위 -> 밀리초 단위 변환)
+                time_extract = (t_extract_end - t_extract_start) * 1000
+                time_infer = (t_infer_end - t_infer_start) * 1000
+                time_total = (end_total - start_total) * 1000
+
                 print(f"Prediction: {result}")
+                print("-" * 50)
+                print(f"[Performance Report]")
+                print(f" > Total Time      : {time_total:.2f} ms")
+                print(f" > Feature Extract : {time_extract:.2f} ms")
+                print(f" > Model Inference : {time_infer:.2f} ms")
+                print("-" * 50)
+
             else:
                 print("Feature extraction failed.")
         else:
