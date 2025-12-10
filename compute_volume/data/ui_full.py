@@ -11,22 +11,21 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QFontDatabase
 
-# === [설정] 테스트 모드 (True면 카메라 대신 기존 파일 사용) ===
+# === [설정] 테스트 모드 (True면 카메라 없이 더미 데이터 사용) ===
 TEST_MODE = True 
 
-# === Arducam 라이브러리 임포트 ===
+# === 라이브러리 로드 (Arducam & Inference) ===
 try:
-    if not TEST_MODE: # 테스트 모드가 아닐 때만 카메라 라이브러리 로드
+    if not TEST_MODE:
         import ArducamDepthCamera as ac
         CAMERA_AVAILABLE = True
     else:
         print("[시스템] 테스트 모드: 카메라 라이브러리 로드 안 함")
         CAMERA_AVAILABLE = False
 except ImportError:
-    print("[시스템] ArducamDepthCamera 라이브러리를 찾을 수 없습니다. 카메라 기능을 사용할 수 없습니다.")
+    print("[시스템] ArducamDepthCamera 라이브러리 없음.")
     CAMERA_AVAILABLE = False
 
-# === NumPy 추론 엔진 임포트 ===
 try:
     from inference_pure import NumpyVolumePredictor, FeatureExtractor
     
@@ -40,13 +39,12 @@ try:
         def predict(self, data_path):
             feats = self.extractor.process(data_path, roi=self.FIXED_ROI)
             if feats is None:
-                print("[시스템] 특징 추출 실패 (데이터 품질 낮음)")
                 return {'volume_ml': 0, 'error': True}
             result = self.predictor.predict(feats)
             return result
 
 except ImportError:
-    print("[시스템] inference_pure.py를 찾을 수 없습니다. 더미 모드로 동작합니다.")
+    print("[시스템] inference_pure.py 없음. 더미 모드 동작.")
     SmartVolumeEstimator = None
 
 
@@ -67,6 +65,11 @@ class ModernDispenserUI(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        # === [물 용량 관리 변수] ===
+        self.MAX_CAPACITY = 2500.0  # 전체 용량 2.5L
+        self.current_water = 2500.0 # 현재 남은 물
+        self.pending_deduction = 0.0 # 출수 중인 양
+
         self.MODEL_PATH = "model_weights.npz"
         self.TEMP_DATA_PATH = "712_wine_11_depth.npy" 
         
@@ -77,6 +80,11 @@ class ModernDispenserUI(QMainWindow):
         self.current_value = 120.0    
         self.is_dispensing = False 
         
+        # 시리얼 데이터를 주기적으로 체크하는 타이머
+        self.check_timer = QTimer()
+        self.check_timer.setInterval(100) # 0.1초마다 확인
+        self.check_timer.timeout.connect(self.check_serial_feedback)
+
         self.init_inference_engine()
         self.init_ui()
         
@@ -84,6 +92,7 @@ class ModernDispenserUI(QMainWindow):
         self.volume_buttons = [self.btn_v1, self.btn_v2, self.btn_v3]
 
         self.update_display()
+        self.update_water_card() # 초기 물 용량 UI 갱신
         self.highlight_button('VOLUME', 120.0)
 
     def init_serial_connection(self):
@@ -99,7 +108,7 @@ class ModernDispenserUI(QMainWindow):
                 target_port = '/dev/ttyUSB0' 
 
             print(f"[시리얼] 아두이노 연결 시도: {target_port}")
-            self.arduino = serial.Serial(port=target_port, baudrate=9600, timeout=1)
+            self.arduino = serial.Serial(port=target_port, baudrate=9600, timeout=0.1)
             time.sleep(2)
             print("[시리얼] 아두이노 연결 성공")
         except Exception as e:
@@ -115,7 +124,7 @@ class ModernDispenserUI(QMainWindow):
             except Exception as e:
                 print(f"[오류] 모델 로드 실패: {e}")
         else:
-            print(f"[시스템] 경고: 추론 엔진을 로드할 수 없습니다. (파일 없음: {self.MODEL_PATH})")
+            print(f"[시스템] 경고: 추론 엔진 로드 불가.")
 
     def load_custom_fonts(self):
         font_db = QFontDatabase()
@@ -124,7 +133,6 @@ class ModernDispenserUI(QMainWindow):
                 font_db.addApplicationFont(font_file)
 
     def init_ui(self):
-        # (UI 설정 코드는 기존과 동일하므로 생략 - 변경사항 없음)
         self.setWindowTitle("Premium Water Dispenser")
         self.setGeometry(100, 100, 850, 550)
         self.load_custom_fonts()
@@ -166,7 +174,6 @@ class ModernDispenserUI(QMainWindow):
         self.lbl_status = QLabel("MANUAL MODE")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setFont(QFont(self.MAIN_FONT_FAMILY, 12, self.WEIGHT_BOLD))
-        self.lbl_status.setStyleSheet("background-color: transparent; color: #007AFF; letter-spacing: 1px;")
         
         self.lbl_main_value = QLabel("120")
         self.lbl_main_value.setAlignment(Qt.AlignCenter)
@@ -202,12 +209,17 @@ class ModernDispenserUI(QMainWindow):
         today = datetime.date.today()
         next_care = today + datetime.timedelta(days=15)
         
+        # === [카드 UI] ===
         self.card_usage = self.create_info_card("사용 기간", "10개월", "#1C1C1E")
         control_grid.addWidget(self.card_usage, 2, 0)
+        
         self.card_date = self.create_info_card("다음 관리", f"{next_care.strftime('%m.%d')}", "#007AFF")
         control_grid.addWidget(self.card_date, 2, 1)
-        self.card_temp = self.create_info_card("물 온도", "4°C", "#30D158")
+        
+        # [수정됨] 물 용량 카드 (클릭 시 리셋 기능 연결)
+        self.card_temp = self.create_info_card("물 용량", "100%", "#30D158", on_click=self.reset_water_capacity)
         control_grid.addWidget(self.card_temp, 2, 2)
+        # ==========================
 
         self.btn_up = QPushButton("▲")
         self.btn_up.clicked.connect(lambda: self.adjust_value(1))
@@ -265,21 +277,33 @@ class ModernDispenserUI(QMainWindow):
         right_panel_layout.addWidget(self.btn_pour)
         main_h_layout.addLayout(right_panel_layout)
 
-    def create_info_card(self, title, value, value_color):
+    # [수정됨] 클릭 이벤트를 받을 수 있도록 on_click 인자 추가
+    def create_info_card(self, title, value, value_color, on_click=None):
         frame = QFrame()
         frame.setProperty("class", "info_card")
         frame.setFixedHeight(85)
+        
+        # 클릭 이벤트 처리 로직 추가
+        if on_click:
+            frame.setCursor(Qt.PointingHandCursor)
+            # 마우스 클릭 이벤트 오버라이드
+            frame.mousePressEvent = lambda event: on_click()
+
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(2)
+        
         lbl_title = QLabel(title)
         lbl_title.setFont(QFont(self.MAIN_FONT_FAMILY, 11, self.WEIGHT_MEDIUM))
         lbl_title.setStyleSheet("color: #8E8E93; border: none; background: transparent;")
         lbl_title.setAlignment(Qt.AlignLeft)
+        
         lbl_value = QLabel(value)
+        lbl_value.setObjectName("value_label") 
         lbl_value.setFont(QFont(self.MAIN_FONT_FAMILY, 16, self.WEIGHT_BOLD))
         lbl_value.setStyleSheet(f"color: {value_color}; border: none; background: transparent;")
         lbl_value.setAlignment(Qt.AlignLeft)
+        
         layout.addWidget(lbl_title)
         layout.addWidget(lbl_value)
         return frame
@@ -341,31 +365,40 @@ class ModernDispenserUI(QMainWindow):
             self.lbl_status.setText("MANUAL MODE")
             self.lbl_status.setStyleSheet("background-color: transparent; color: #007AFF; letter-spacing: 1px;")
 
+    # === [신규 기능] 물 용량 리셋 (100% 충전) ===
+    def reset_water_capacity(self):
+        print("[시스템] 물 보충 완료: 용량을 100%로 리셋합니다.")
+        self.current_water = self.MAX_CAPACITY
+        self.update_water_card()
+
+    # === [핵심 기능] 물 용량 UI 업데이트 ===
+    def update_water_card(self):
+        percentage = (self.current_water / self.MAX_CAPACITY) * 100
+        
+        # 0% 이하 방지
+        if percentage < 0: percentage = 0
+        
+        # 20% 미만이면 붉은색(#FF3B30), 아니면 초록색(#30D158)
+        color = "#FF3B30" if percentage < 20 else "#30D158"
+        
+        # 카드 내부의 값 라벨 찾기
+        lbl_value = self.card_temp.findChild(QLabel, "value_label")
+        if lbl_value:
+            lbl_value.setText(f"{percentage:.0f}%")
+            lbl_value.setStyleSheet(f"color: {color}; border: none; background: transparent;")
+
     def capture_depth_image(self, duration=0.3):
-        # [수정] 테스트 모드 처리
         if TEST_MODE:
             print(f"[테스트 모드] 카메라 촬영 건너뜀. 기존 파일 사용: {self.TEMP_DATA_PATH}")
-            if os.path.exists(self.TEMP_DATA_PATH):
-                return True
-            else:
-                print(f"[오류] 테스트 파일이 없습니다: {self.TEMP_DATA_PATH}")
-                return False
+            return os.path.exists(self.TEMP_DATA_PATH)
 
         if not CAMERA_AVAILABLE:
-            print("[경고] 카메라 라이브러리가 없어 촬영을 건너뜁니다.")
             return False
 
-        print("[카메라] 초기화 중...")
         try:
             cam = ac.ArducamCamera()
-            ret = cam.open(ac.Connection.CSI, 0)
-            if ret != 0:
-                print(f"[오류] 카메라 열기 실패. 코드: {ret}")
-                return False
-
-            ret = cam.start(ac.FrameType.DEPTH)
-            if ret != 0:
-                print(f"[오류] 카메라 시작 실패. 코드: {ret}")
+            if cam.open(ac.Connection.CSI, 0) != 0: return False
+            if cam.start(ac.FrameType.DEPTH) != 0: 
                 cam.close()
                 return False
 
@@ -373,7 +406,6 @@ class ModernDispenserUI(QMainWindow):
             captured_frames = []
             start_time = time.time()
             
-            print(f"[카메라] {duration}초간 데이터 수집 시작...")
             while (time.time() - start_time) < duration:
                 frame = cam.requestFrame(100)
                 if frame is not None and isinstance(frame, ac.DepthData):
@@ -387,27 +419,44 @@ class ModernDispenserUI(QMainWindow):
             if captured_frames:
                 avg_depth = np.mean(captured_frames, axis=0).astype(np.float32)
                 np.save(self.TEMP_DATA_PATH, avg_depth)
-                print(f"[카메라] 저장 완료: {self.TEMP_DATA_PATH}")
                 return True
             else:
                 return False
-        except Exception as e:
-            print(f"[오류] 카메라 예외 발생: {e}")
+        except Exception:
             return False
 
     def send_to_arduino(self, volume):
         if self.arduino and self.arduino.is_open:
             try:
-                # [수정] 소수점을 버리고 정수형(int)으로 변환
+                # 버퍼 비우기 (이전 데이터 삭제)
+                self.arduino.reset_input_buffer()
+                
                 vol_int = int(volume) 
                 msg = f"{vol_int}\n"
-                
                 self.arduino.write(msg.encode('utf-8'))
-                print(f"[시리얼] 전송: {msg.strip()} (원본: {volume})")
+                print(f"[시리얼] 전송: {msg.strip()}")
             except Exception as e:
                 print(f"[시리얼] 전송 실패: {e}")
-        else:
-            print("[시리얼] 연결 안됨.")
+
+    # === [핵심 기능] 아두이노 DONE 신호 처리 ===
+    def check_serial_feedback(self):
+        if self.arduino and self.arduino.is_open and self.arduino.in_waiting:
+            try:
+                line = self.arduino.readline().decode('utf-8').strip()
+                if line == "DONE":
+                    print("[시스템] 출수 완료 신호 수신 (DONE)")
+                    
+                    # 1. 물 용량 차감
+                    self.current_water -= self.pending_deduction
+                    if self.current_water < 0: self.current_water = 0
+                    
+                    # 2. UI 업데이트
+                    self.update_water_card()
+                    
+                    # 3. 상태 리셋
+                    self.reset_ui_state()
+            except Exception as e:
+                print(f"[오류] 시리얼 읽기 실패: {e}")
 
     def process_dispense_sequence(self):
         if self.is_dispensing:
@@ -416,16 +465,13 @@ class ModernDispenserUI(QMainWindow):
             self.reset_ui_state()    
             return
 
-        original_text = self.lbl_status.text()
         self.lbl_status.setText("SCANNING...")
         self.btn_pour.setEnabled(False) 
         self.btn_pour.setText("Processing...")
         QApplication.processEvents() 
 
-        # 1. 카메라 촬영 (테스트 모드일 경우 파일 확인만 수행)
+        # 1. 카메라 촬영
         success = self.capture_depth_image(duration=0.3)
-        
-        # 테스트 모드가 아니고 카메라가 실패했을 때만 에러 처리
         if not success and not TEST_MODE and CAMERA_AVAILABLE:
             QMessageBox.warning(self, "오류", "카메라 촬영에 실패했습니다.")
             self.reset_ui_state()
@@ -436,39 +482,27 @@ class ModernDispenserUI(QMainWindow):
              return
 
         # 2. 추론
-        final_volume_ml = 0
-        predicted_capacity = 0
+        predicted_capacity = 350.0
+        if self.estimator and os.path.exists(self.TEMP_DATA_PATH):
+            result = self.estimator.predict(self.TEMP_DATA_PATH)
+            if not result.get('error'):
+                predicted_capacity = result.get('volume_ml', 0)
+            print(f"[시스템] 추론된 컵 용량: {predicted_capacity}ml")
         
-        if self.estimator:
-            if os.path.exists(self.TEMP_DATA_PATH):
-                print(f"[시스템] 추론 시작: {self.TEMP_DATA_PATH}")
-                result = self.estimator.predict(self.TEMP_DATA_PATH)
-                
-                if result.get('error'):
-                    predicted_capacity = 350.0
-                else:
-                    predicted_capacity = result.get('volume_ml', 0)
-                
-                print(f"[시스템] 추론된 컵 용량: {predicted_capacity}ml (모드: {result.get('mode', 'N/A')})")
-            else:
-                print("[시스템] 데이터 없음. 더미 값 사용.")
-                predicted_capacity = 350.0 
-        else:
-            print("[시스템] 추론 엔진 없음. 더미 값 사용.")
-            predicted_capacity = 350.0
-
-        # 3. 출수량 계산
+        # 3. 출수량 계산 및 저장 (pending_deduction)
+        final_volume_ml = 0
         if self.current_mode == 'RATIO':
             final_volume_ml = predicted_capacity * self.current_value
-            print(f"[출수] RATIO ({self.current_value*100}%) | 컵: {predicted_capacity}ml -> 출수: {final_volume_ml:.1f}ml")
             self.lbl_main_value.setText(f"{int(final_volume_ml)}")
             self.lbl_unit.setText("ml (Auto)")
-            QApplication.processEvents()
         else:
             final_volume_ml = self.current_value
-            print(f"[출수] MANUAL | 설정: {final_volume_ml}ml")
 
-        # 4. 아두이노 전송 (여기서 정수로 변환되어 전송됨)
+        # 출수 예정량 저장
+        self.pending_deduction = final_volume_ml 
+        print(f"[출수] 명령: {final_volume_ml}ml")
+
+        # 4. 아두이노 전송 및 모니터링 시작
         self.send_to_arduino(final_volume_ml)
         self.enable_stop_mode()
 
@@ -482,15 +516,19 @@ class ModernDispenserUI(QMainWindow):
         self.lbl_status.setText("DISPENSING...")
         self.lbl_status.setStyleSheet("color: #FF3B30; letter-spacing: 1px;")
 
+        # 기존 15초 타임아웃 + 시리얼 감지 시작
+        self.check_timer.start() 
         QTimer.singleShot(15000, self.auto_reset_check)
 
     def auto_reset_check(self):
         if self.is_dispensing:
-            print("[시스템] 타임아웃: UI 자동 초기화")
+            print("[시스템] 타임아웃: 강제 UI 초기화")
             self.reset_ui_state()
 
     def reset_ui_state(self, original_status_text=None):
         self.is_dispensing = False
+        self.check_timer.stop() # 시리얼 감지 중단
+        
         self.btn_pour.setText("SCAN & DISPENSE")
         self.btn_pour.setEnabled(True)
         self.btn_pour.setProperty("state", "normal") 

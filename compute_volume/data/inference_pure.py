@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import time
 import glob
 from skimage import measure, morphology
 from typing import List, Optional, Tuple, Dict, Union

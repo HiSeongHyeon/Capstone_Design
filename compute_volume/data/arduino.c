@@ -1,46 +1,40 @@
-#include <LiquidCrystal_I2C.h>
-#include <Wire.h>
+// [수정됨] LCD 라이브러리 및 관련 변수 제거 완료
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+const int flowSensor = 2;   // 유량 센서 핀
+const int IN1 = 5;          // 모터 드라이버 핀
+const int IN2 = 4;          // 모터 드라이버 핀 
+const int ENA = 6;          // 모터 속도 제어(PWM)
 
-const int flowSensor = 2;   // Flow sensor pin
-const int IN1=5;  // motor pin
-const int IN2=4;  // motor pin 
-const int ENA=6;  // motor pin
+// 물리 버튼 핀
+const int START_BTN = 8;    // 시작 버튼
+const int STOP_BTN  = 9;    // 정지 버튼
 
-// button pin
-const int START_BTN = 8;   // START button
-const int STOP_BTN  = 9;   // STOP button
+// 유량 센서 보정값 (LCD용 별도 상수는 제거함)
+const float PULSES_PER_LITER = 565.0f;
 
-// Lcd control 
-const float PULSES_PER_LITER_LCD  = 660.0f;  
-
-// Flow control 
-const float PULSES_PER_LITER_FLOW = 565.0f;
-
-// initialization
+// 변수 초기화
 volatile unsigned long pulseCount = 0;
-float total_mL_LCD  = 0.0f;     
 float total_mL_FLOW = 0.0f; 
 unsigned long lastFlowMillis = 0;
 const unsigned long flowInterval = 100;
 
-// pump initialization
+// 펌프 상태 변수
 bool runEnabled = false;
 
-// Limit_Flow = Rpi5 input (기본값 0으로 설정, 시리얼 입력 대기)
+// 목표 출수량 (파이썬에서 받음)
 float Limit_Flow = 0.0f; 
 
+// 인터럽트 서비스 루틴
 void pulseCounter() { 
   pulseCount++; 
 }
 
 void setup() {
-  // [수정] 시리얼 통신 시작 (라즈베리파이와 통신용)
+  // 시리얼 통신 설정
   Serial.begin(9600); 
-  // 타임아웃 설정: parseFloat가 너무 오래 기다리지 않도록 (기본 1000ms -> 50ms)
   Serial.setTimeout(50); 
 
+  // 핀 모드 설정
   pinMode(flowSensor, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(flowSensor), pulseCounter, FALLING);
 
@@ -51,39 +45,31 @@ void setup() {
   pinMode(STOP_BTN, INPUT_PULLUP);
   pinMode(START_BTN, INPUT_PULLUP);
 
-  lcd.init();
-  lcd.backlight();
-  lcd.clear();
-
   lastFlowMillis = millis();
 }
 
 void loop() {
-  // [수정] 시리얼 데이터 수신 로직 강화
+  // 1. 시리얼 명령 수신 (파이썬 -> 아두이노)
   if (Serial.available() > 0) {
-    float receivedValue = Serial.parseFloat(); // 데이터 읽기
+    float receivedValue = Serial.parseFloat(); 
 
-    // === 1. 정지 신호 수신 (-1) ===
+    // 정지 신호 (-1)
     if (receivedValue == -1.0f) {
       runEnabled = false;
-      Motor1_Brake(); // 즉시 정지
-      
-      // 버퍼에 남은 찌꺼기 데이터 비우기 (엔터키 등)
-      while(Serial.available()) { Serial.read(); }
+      Motor1_Brake(); 
+      while(Serial.available()) { Serial.read(); } // 버퍼 비우기
     }
-    // === 2. 출수 명령 수신 (양수) ===
+    // 출수 명령 (양수)
     else if (receivedValue > 0) {
       Limit_Flow = receivedValue;
-      
-      // 새로운 출수를 위해 유량 카운터 초기화
       total_mL_FLOW = 0.0f; 
-      
-      runEnabled = true; // 모터 작동 시작 플래그
+      runEnabled = true; 
     }
   }
 
-  // 물리 버튼 로직 (기존 유지)
+  // 2. 물리 버튼 제어
   if (digitalRead(START_BTN) == LOW) {
+    // 목표량이 설정 안 된 상태에서 물리버튼 누르면 기본 300ml 출수
     if (Limit_Flow <= 0) Limit_Flow = 300.0f; 
     total_mL_FLOW = 0.0f; 
     runEnabled = true;
@@ -94,6 +80,7 @@ void loop() {
     Motor1_Brake();
   }
 
+  // 3. 유량 계산 및 모터 제어 (0.1초 간격)
   unsigned long now = millis();
 
   if (now - lastFlowMillis >= flowInterval) {
@@ -103,47 +90,28 @@ void loop() {
     pulseCount = 0;
     interrupts();
 
-    // LCD, Flow separate
-    float tick_LCD  = (float)pulses * (1000.0f / PULSES_PER_LITER_LCD);
-    float tick_FLOW = (float)pulses * (1000.0f / PULSES_PER_LITER_FLOW);
+    // 펄스를 ml로 변환
+    float tick_FLOW = (float)pulses * (1000.0f / PULSES_PER_LITER);
 
     if (runEnabled) {
-      total_mL_LCD  += tick_LCD;      
       total_mL_FLOW += tick_FLOW;     
     }
 
-    // Flow Control Check
+    // === 목표량 도달 체크 ===
     if (total_mL_FLOW >= Limit_Flow) {
+      // 정상적으로 출수가 완료된 순간에만 신호 전송
+      if (runEnabled) {
+        Serial.println("DONE");  // 파이썬으로 완료 신호 전송
+      }
       runEnabled = false;
       Motor1_Brake();
     }
 
-    // 실제 모터 구동 명령 (타이머 내부에서도 상태 확인)
+    // 모터 구동
     if (runEnabled) {
-      Motor1_Forward(255);
+      Motor1_Forward(255); // 최대 속도
     } else {
       Motor1_Brake();
-    }
-
-    // Lcd display 
-    lcd.setCursor(0, 0);
-    lcd.print("Tot:      mL");
-    lcd.setCursor(5, 0);
-    lcd.print("    ");
-    lcd.setCursor(5, 0);
-    lcd.print((unsigned long)total_mL_LCD); 
-
-    lcd.setCursor(0, 1);
-    lcd.print("Set:          "); 
-    lcd.setCursor(5, 1);
-    lcd.print((int)Limit_Flow);
-    
-    // 상태 표시
-    lcd.setCursor(10, 1);
-    if (runEnabled) {
-      lcd.print(" RUN  ");
-    } else {
-      lcd.print(" STOP ");
     }
 
     lastFlowMillis = now;
@@ -159,5 +127,5 @@ void Motor1_Forward(int Speed) {
 void Motor1_Brake() {
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
-  analogWrite(ENA, 0); // PWM도 0으로 확실히 끔
+  analogWrite(ENA, 0);
 }
